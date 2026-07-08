@@ -142,7 +142,7 @@ export function analyzeAllPolicies(context: TenantContext): AnalysisResult {
       ...checkDeviceRegistrationBypass(policy),
       ...checkServicePrincipalExclusions(policy, context),
       ...checkMissingMFA(policy),
-      ...checkAllUsersAllApps(policy),
+      ...checkAllUsersAllApps(policy, breakGlass),
       ...checkReportOnlyState(policy),
       ...checkSessionControls(policy),
       ...checkLocationConditions(policy, context),
@@ -576,7 +576,8 @@ function checkMissingMFA(policy: ConditionalAccessPolicy): Finding[] {
 // ─── Check: All Users + All Apps Coverage ────────────────────────────────────
 
 function checkAllUsersAllApps(
-  policy: ConditionalAccessPolicy
+  policy: ConditionalAccessPolicy,
+  breakGlass: BreakGlassCandidate | null
 ): Finding[] {
   const findings: Finding[] = [];
   const { users, applications } = policy.conditions;
@@ -584,32 +585,53 @@ function checkAllUsersAllApps(
   const targetsAllUsers = users.includeUsers.includes("All");
   const targetsAllApps = applications.includeApplications.includes("All");
 
-  if (targetsAllUsers && targetsAllApps && policy.state === "enabled") {
-    const hasUserExclusions =
-      users.excludeUsers.length > 0 ||
-      users.excludeGroups.length > 0 ||
-      users.excludeRoles.length > 0;
-    const hasAppExclusions = applications.excludeApplications.length > 0;
-
-    if (hasUserExclusions || hasAppExclusions) {
-      findings.push({
-        id: nextFindingId(),
-        policyId: policy.id,
-        policyName: policy.displayName,
-        severity: "medium",
-        category: "Policy Scope",
-        title: "Broad policy with exclusions — review for gaps",
-        description:
-          `This policy targets All Users and All Cloud Apps but has exclusions. ` +
-          `User exclusions: ${users.excludeUsers.length + users.excludeGroups.length + users.excludeRoles.length}, ` +
-          `App exclusions: ${applications.excludeApplications.length}. ` +
-          `Exclusions create potential bypass paths.`,
-        recommendation:
-          "Regularly audit exclusions. Use break-glass accounts sparingly. " +
-          "Ensure every excluded entity is documented with a business justification.",
-      });
-    }
+  if (!(targetsAllUsers && targetsAllApps && policy.state === "enabled")) {
+    return findings;
   }
+
+  // Break-glass exclusions are expected best practice (Microsoft recommends
+  // excluding emergency-access accounts from every CA policy) and are already
+  // surfaced by the dedicated Break-Glass check — which flags a positive
+  // "Break-glass excluded ✓". Counting them here as a "gap" both contradicts
+  // that finding and buries real exclusions in noise. Exclude the identified
+  // break-glass account/group from the tally.
+  const bgId = breakGlass?.id?.toLowerCase();
+  const isBreakGlass = (id: string) => bgId != null && id.toLowerCase() === bgId;
+
+  const nonBgUserExclusions =
+    users.excludeUsers.filter((id) => !isBreakGlass(id)).length +
+    users.excludeGroups.filter((id) => !isBreakGlass(id)).length +
+    users.excludeRoles.filter((id) => !isBreakGlass(id)).length;
+  const appExclusions = applications.excludeApplications.length;
+
+  // Only break-glass (or nothing) excluded — expected hygiene, not a gap.
+  if (nonBgUserExclusions === 0 && appExclusions === 0) return findings;
+
+  // App exclusions are a genuine bypass surface and keep Medium; user/group/role
+  // exclusions beyond break-glass are an audit reminder and drop to Low.
+  const severity: Severity = appExclusions > 0 ? "medium" : "low";
+  const bgExcluded =
+    users.excludeUsers.some(isBreakGlass) || users.excludeGroups.some(isBreakGlass);
+  const bgNote = bgExcluded
+    ? " (the break-glass exclusion is expected and is not counted here)"
+    : "";
+
+  findings.push({
+    id: nextFindingId(),
+    policyId: policy.id,
+    policyName: policy.displayName,
+    severity,
+    category: "Policy Scope",
+    title: "Broad policy with exclusions — review for gaps",
+    description:
+      `This policy targets All Users and All Cloud Apps but has exclusions beyond break-glass. ` +
+      `Non-break-glass user/group/role exclusions: ${nonBgUserExclusions}, ` +
+      `App exclusions: ${appExclusions}.${bgNote} ` +
+      `Exclusions create potential bypass paths.`,
+    recommendation:
+      "Regularly audit exclusions. Ensure every excluded entity — other than documented " +
+      "break-glass accounts — has a business justification and is covered by a compensating policy.",
+  });
 
   return findings;
 }
