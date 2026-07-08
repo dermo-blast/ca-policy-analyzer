@@ -148,7 +148,7 @@ export function analyzeAllPolicies(context: TenantContext): AnalysisResult {
       ...checkLocationConditions(policy, context),
       ...checkLegacyAuth(policy),
       ...checkCABypassApps(policy, context),
-      ...checkUserAgentBypass(policy),
+      ...checkUserAgentBypass(policy, context),
       ...checkMicrosoftManagedPolicy(policy),
       ...checkPrivilegedRoleExclusions(policy, context),
       ...checkGuestExternalUserExclusions(policy, context),
@@ -603,27 +603,42 @@ function checkMissingMFA(policy: ConditionalAccessPolicy): Finding[] {
   const findings: Finding[] = [];
   const grant = policy.grantControls;
   if (policy.state === "disabled") return findings;
+  if (!grant || grant.builtInControls.length === 0) return findings;
+  if (grant.builtInControls.includes("block")) return findings;
 
   const requiresMfa =
-    grant?.builtInControls.includes("mfa") ||
-    grant?.authenticationStrength != null;
+    grant.builtInControls.includes("mfa") || grant.authenticationStrength != null;
+  if (requiresMfa) return findings;
 
-  if (!requiresMfa && grant && grant.builtInControls.length > 0 && !grant.builtInControls.includes("block")) {
-    findings.push({
-      id: nextFindingId(),
-      policyId: policy.id,
-      policyName: policy.displayName,
-      severity: "medium",
-      category: "Swiss Cheese Model",
-      title: "Policy does not require MFA",
-      description:
-        `This policy grants access with: ${grant.builtInControls.join(", ")} but does not require MFA. ` +
-        `Per the Swiss cheese model, MFA should be the bare minimum requirement layered under everything else.`,
-      recommendation:
-        "Add MFA as a grant control requirement. MFA should be the baseline layer of defense. " +
-        "Consider using Authentication Strengths for phishing-resistant MFA.",
-    });
-  }
+  // Agent / workload-identity policies (e.g. `includeUsers: ["None"]` targeting
+  // agent identities) cannot perform interactive MFA — requiring it of them is
+  // not meaningful.
+  if (!policyTargetsUsers(policy)) return findings;
+
+  // A policy whose grant controls are ALL strong device-trust / app-protection
+  // controls is not "missing MFA" in a weak sense — requiring a compliant/hybrid
+  // device or app protection is a legitimate standalone control, typically
+  // layered on top of a separate MFA baseline. (The "no MFA anywhere in the
+  // tenant" case is covered by the tenant-wide MFA-coverage check.)
+  const allStrongNonMfaControls = grant.builtInControls.every(
+    (c) => c in EQUIVALENT_STRENGTH_GROUPS
+  );
+  if (allStrongNonMfaControls) return findings;
+
+  findings.push({
+    id: nextFindingId(),
+    policyId: policy.id,
+    policyName: policy.displayName,
+    severity: "medium",
+    category: "Swiss Cheese Model",
+    title: "Policy does not require MFA",
+    description:
+      `This policy grants access with: ${grant.builtInControls.join(", ")} but does not require MFA. ` +
+      `Per the Swiss cheese model, MFA should be the bare minimum requirement layered under everything else.`,
+    recommendation:
+      "Add MFA as a grant control requirement. MFA should be the baseline layer of defense. " +
+      "Consider using Authentication Strengths for phishing-resistant MFA.",
+  });
 
   return findings;
 }
@@ -906,8 +921,30 @@ function checkCABypassApps(
 // Tools like MFASweep enumerate user-agent strings to find gaps where
 // platform-specific CA policies can be bypassed by spoofing the UA.
 
+/**
+ * Whether a policy blocks access from unknown/unsupported device platforms —
+ * the recommended companion control that closes the user-agent-spoofing path.
+ * The canonical pattern includes "all" platforms, excludes the recognized ones,
+ * and blocks, so anything unrecognized is denied. Requires broad scope (All
+ * Users + All Apps) to count as a tenant-wide compensating control.
+ */
+function isBlockUnknownPlatformsPolicy(p: ConditionalAccessPolicy): boolean {
+  if (p.state !== "enabled") return false;
+  const pl = p.conditions.platforms;
+  const blocks = p.grantControls?.builtInControls.includes("block");
+  return (
+    !!blocks &&
+    !!pl &&
+    pl.includePlatforms.includes("all") &&
+    pl.excludePlatforms.length > 0 &&
+    p.conditions.users.includeUsers.includes("All") &&
+    p.conditions.applications.includeApplications.includes("All")
+  );
+}
+
 function checkUserAgentBypass(
-  policy: ConditionalAccessPolicy
+  policy: ConditionalAccessPolicy,
+  context: TenantContext
 ): Finding[] {
   const findings: Finding[] = [];
   if (policy.state === "disabled") return findings;
@@ -930,23 +967,50 @@ function checkUserAgentBypass(
         grant?.builtInControls.includes("domainJoinedDevice");
 
       if (requiresMfa || requiresCompliance) {
-        findings.push({
-          id: nextFindingId(),
-          policyId: policy.id,
-          policyName: policy.displayName,
-          severity: "high",
-          category: "User-Agent Bypass",
-          title: `Platform condition only targets ${targeted.join(", ")} — user-agent spoofing risk`,
-          description:
-            `This policy enforces controls only for platforms: ${targeted.join(", ")}. ` +
-            `An attacker can spoof their user-agent string to appear as an unrecognized platform ` +
-            `(e.g. Linux, ChromeOS, or a custom UA) to bypass this policy entirely. ` +
-            `Tools like MFASweep actively exploit this gap by enumerating user-agent strings.`,
-          recommendation:
-            "Change the platform condition to target \"All platforms\" instead of specific platforms, or " +
-            "create a companion policy that blocks access from unknown/unsupported device platforms " +
-            "(supplementary CA hardening). This eliminates the user-agent spoofing bypass path.",
-        });
+        // If a broad block-unknown-platforms policy exists, the spoofing path to
+        // an *unrecognized* platform is already closed — downgrade to info and
+        // name the companion policy instead of flagging High.
+        const companion = context.policies.find(
+          (p) => p.id !== policy.id && isBlockUnknownPlatformsPolicy(p)
+        );
+
+        if (companion) {
+          findings.push({
+            id: nextFindingId(),
+            policyId: policy.id,
+            policyName: policy.displayName,
+            severity: "info",
+            category: "User-Agent Bypass",
+            title: `Platform condition targets ${targeted.join(", ")} — unknown-platform bypass covered by companion policy`,
+            description:
+              `This policy enforces controls only for platforms: ${targeted.join(", ")}. ` +
+              `On its own that would allow a user-agent-spoofing bypass to an unrecognized platform, but ` +
+              `**${companion.displayName}** blocks access from unknown/unsupported platforms tenant-wide, ` +
+              `which closes that path.`,
+            recommendation:
+              `No action required for the unknown-platform bypass — it is covered by **${companion.displayName}**. ` +
+              `Do verify that any recognized platforms you intentionally do not target here (e.g. iOS/Android) are ` +
+              `covered by another policy such as app protection / MAM.`,
+          });
+        } else {
+          findings.push({
+            id: nextFindingId(),
+            policyId: policy.id,
+            policyName: policy.displayName,
+            severity: "high",
+            category: "User-Agent Bypass",
+            title: `Platform condition only targets ${targeted.join(", ")} — user-agent spoofing risk`,
+            description:
+              `This policy enforces controls only for platforms: ${targeted.join(", ")}. ` +
+              `An attacker can spoof their user-agent string to appear as an unrecognized platform ` +
+              `(e.g. Linux, ChromeOS, or a custom UA) to bypass this policy entirely. ` +
+              `Tools like MFASweep actively exploit this gap by enumerating user-agent strings.`,
+            recommendation:
+              "Change the platform condition to target \"All platforms\" instead of specific platforms, or " +
+              "create a companion policy that blocks access from unknown/unsupported device platforms " +
+              "(supplementary CA hardening). This eliminates the user-agent spoofing bypass path.",
+          });
+        }
       }
     }
   }
