@@ -19,7 +19,6 @@ import { TemplateAnalysisResult } from "./template-matcher";
 import { isFociApp, getFociApp, getFociFamily } from "@/data/foci-families";
 import {
   CA_IMMUNE_RESOURCE_MAP,
-  RESOURCE_EXCLUSION_BYPASSES,
   DEVICE_REGISTRATION_RESOURCE,
   WELL_KNOWN_APP_MAP,
   CA_BYPASS_APPS,
@@ -177,6 +176,11 @@ export function analyzeAllPolicies(context: TenantContext): AnalysisResult {
 
   // Convert critical/high exclusion findings into the main findings list too
   for (const ef of exclusionFindings) {
+    // The "All resources" low-privilege scope change is already surfaced once by
+    // the tenant-wide Low-Privilege Scope Enforcement check; don't also promote
+    // the documented-exclusion entry into the main list (it remains visible in
+    // the exclusion-findings view).
+    if (ef.exclusion.id === "all-resources-exclusion-change") continue;
     if (ef.exclusion.severity === "critical" || ef.exclusion.severity === "high") {
       findings.push({
         id: nextFindingId(),
@@ -236,87 +240,18 @@ function checkFociExclusions(
 }
 
 // ─── Check: Resource Exclusion — Low-Privilege Scope Enforcement (March 2026) ─
+// Consolidated into the tenant-wide "Low-Privilege Scope Enforcement" check in
+// checkTenantWideGaps, which reports a single rollup across all affected
+// policies (and adjusts severity based on Azure AD Graph coverage). This
+// per-policy check previously duplicated that finding — plus the MS Learn
+// "all-resources-exclusion-change" documented-exclusion entry — producing the
+// same concern up to three times for one policy. No longer fires per-policy.
 
 function checkResourceExclusion(
-  policy: ConditionalAccessPolicy,
+  _policy: ConditionalAccessPolicy,
   _context: TenantContext
 ): Finding[] {
-  const findings: Finding[] = [];
-  const apps = policy.conditions.applications;
-  const includesAll = apps.includeApplications.includes("All");
-  const hasExclusions = apps.excludeApplications.length > 0;
-
-  if (!includesAll || !hasExclusions) return findings;
-
-  // ── Finding 1: Enforcement change awareness ──
-  // Microsoft is rolling out CA enforcement for low-privilege scopes (March-June 2026).
-  // Previously excluded scopes are now mapped to Azure AD Graph for enforcement.
-  // This may cause apps that ONLY request these scopes to receive CA challenges.
-  
-  const nativeClientScopes = RESOURCE_EXCLUSION_BYPASSES.map(b =>
-    `**${b.resourceName}**: ${b.bypassedScopes.join(", ")}`
-  ).join("\n");
-  
-  const confidentialClientScopes = RESOURCE_EXCLUSION_BYPASSES
-    .filter(b => b.confidentialClientScopes && b.confidentialClientScopes.length > b.bypassedScopes.length)
-    .map(b => {
-      const extraScopes = b.confidentialClientScopes!.filter(s => !b.bypassedScopes.includes(s));
-      return `**${b.resourceName}** (additional): ${extraScopes.join(", ")}`;
-    }).join("\n");
-
-  findings.push({
-    id: nextFindingId(),
-    policyId: policy.id,
-    policyName: policy.displayName,
-    severity: "medium",
-    category: "Resource Exclusion Bypass",
-    title: `${apps.excludeApplications.length} app(s) excluded from "All resources" — verify low-privilege scope enforcement rollout`,
-    description:
-      `This policy targets "All resources" but excludes ${apps.excludeApplications.length} app(s). ` +
-      `**Microsoft is actively changing how this works (March-June 2026 rollout).**\n\n` +
-      `**Legacy behavior (before March 2026):**\n` +
-      `When ANY resource was excluded, these low-privilege scopes were automatically exempt from CA enforcement, ` +
-      `allowing users to access basic directory data without meeting the policy's controls:\n\n` +
-      `*Native clients & SPAs:*\n${nativeClientScopes}\n\n` +
-      `*Confidential clients had a BROADER leak:*\n${confidentialClientScopes}\n\n` +
-      `**New behavior (rolling out March-June 2026):**\n` +
-      `These scopes are now evaluated as directory access and mapped to **Azure AD Graph** ` +
-      `(Windows Azure Active Directory, ID: 00000002-0000-0000-c000-000000000000) as the enforcement audience. ` +
-      `CA policies targeting "All resources" — even with exclusions — will now enforce on these scopes.\n\n` +
-      `**⚠️ Impact of this change:**\n` +
-      `- Apps that only request \`User.Read\`, \`openid\`, or \`profile\` may now prompt users for MFA or device compliance\n` +
-      `- Confidential client apps that were excluded and relied on \`User.Read.All\`, \`GroupMember.Read.All\`, ` +
-      `or \`Member.Read.Hidden\` will now face CA enforcement\n` +
-      `- Directory enumeration that previously bypassed CA (even for excluded apps) is now blocked\n` +
-      `- Custom apps not designed to handle CA challenges may break`,
-    recommendation:
-      `**Action Required:**\n\n` +
-      `1. **Check your tenant's rollout status**: The change is rolling out in phases. Sign in with a test account ` +
-      `and check if low-privilege scope requests now trigger CA challenges.\n\n` +
-      `2. **Review impacted apps**: Use the Usage & Insights report in Microsoft Entra Admin Center ` +
-      `(Entra ID → Monitoring & health → Usage & insights) to identify apps requesting only low-privilege scopes.\n\n` +
-      `3. **Review sign-in logs**: Filter by resource "Windows Azure Active Directory" ` +
-      `(00000002-0000-0000-c000-000000000000) to see which apps are now being evaluated.\n\n` +
-      `4. **Update custom apps**: Applications that only request scopes like \`openid\`, \`profile\`, \`User.Read\` ` +
-      `and are not designed to handle CA claims challenges must be updated per the ` +
-      `[Conditional Access developer guidance](https://learn.microsoft.com/entra/identity-platform/v2-conditional-access-dev-guide).\n\n` +
-      `5. **Best practice**: Remove resource exclusions entirely and use Microsoft's recommended baseline: ` +
-      `"All resources" with no exclusions. Create separate less-restrictive policies for apps that need exemptions.\n\n` +
-      `**Previously leaked confidential client scopes (now being enforced):**\n` +
-      `These scopes were especially dangerous because they allowed directory enumeration ` +
-      `without CA enforcement for excluded confidential client apps:\n` +
-      `- \`User.Read.All\` / \`User.ReadBasic.All\` — enumerate all users in the directory\n` +
-      `- \`People.Read.All\` — read organizational relationships\n` +
-      `- \`GroupMember.Read.All\` — enumerate group memberships including security groups\n` +
-      `- \`Member.Read.Hidden\` — read hidden group memberships\n\n` +
-      `**Learn More:**\n` +
-      `- [CA behavior change for All resources policies](https://learn.microsoft.com/entra/identity/conditional-access/concept-conditional-access-cloud-apps#new-conditional-access-behavior-when-an-all-resources-policy-has-a-resource-exclusion)\n` +
-      `- [Legacy CA behavior with exclusions](https://learn.microsoft.com/entra/identity/conditional-access/concept-conditional-access-cloud-apps#legacy-conditional-access-behavior-when-an-all-resources-policy-has-a-resource-exclusion)\n` +
-      `- [Recommended baseline MFA policy](https://learn.microsoft.com/entra/identity/conditional-access/policy-all-users-mfa-strength)`,
-    relatedIds: RESOURCE_EXCLUSION_BYPASSES.map((b) => b.resourceId),
-  });
-
-  return findings;
+  return [];
 }
 
 // ─── Check: CA-Immune Resources ──────────────────────────────────────────────
@@ -538,6 +473,27 @@ function checkDeviceRegistrationBypass(
 
 // ─── Check: Service Principal Exclusions ─────────────────────────────────────
 
+/**
+ * Built-in Conditional Access application *groups*. These appear in include/
+ * exclude lists as string identifiers (not GUIDs) and are not service
+ * principals, so they are absent from the SP list and app catalog. Recognize
+ * them so they aren't mislabeled as "unrecognized app IDs".
+ */
+const CA_APP_GROUP_ALIASES: Record<string, { displayName: string; purpose: string }> = {
+  office365: {
+    displayName: "Office 365 (app group)",
+    purpose:
+      "Built-in Conditional Access application group covering the core Office 365 services " +
+      "(Exchange Online, SharePoint Online, Teams, and related apps).",
+  },
+  microsoftadminportals: {
+    displayName: "Microsoft Admin Portals (app group)",
+    purpose:
+      "Built-in Conditional Access application group covering the Microsoft admin portals " +
+      "(Microsoft Entra admin center, Microsoft 365 admin center, Azure portal, and others).",
+  },
+};
+
 function checkServicePrincipalExclusions(
   policy: ConditionalAccessPolicy,
   context: TenantContext
@@ -554,9 +510,10 @@ function checkServicePrincipalExclusions(
       (a) => a.appId.toLowerCase() === appId.toLowerCase()
     );
     const appDesc = APP_DESCRIPTION_MAP.get(appId.toLowerCase());
+    const appGroup = CA_APP_GROUP_ALIASES[appId.toLowerCase()];
 
-    const name = appDesc?.displayName ?? sp?.displayName ?? bypassApp?.displayName ?? appId;
-    const purpose = appDesc?.purpose ?? bypassApp?.description ?? (sp ? `Service principal: ${sp.servicePrincipalType ?? "Application"}` : "Unrecognized app ID — not found in service principal list or known app catalog.");
+    const name = appDesc?.displayName ?? sp?.displayName ?? bypassApp?.displayName ?? appGroup?.displayName ?? appId;
+    const purpose = appDesc?.purpose ?? bypassApp?.description ?? appGroup?.purpose ?? (sp ? `Service principal: ${sp.servicePrincipalType ?? "Application"}` : "Unrecognized app ID — not found in service principal list or known app catalog.");
     const reason = appDesc?.commonExclusionReason ?? "No documented exclusion reason. Review whether this exclusion is necessary.";
     const risk = appDesc?.exclusionRisk ?? (bypassApp ? "high" : "medium");
 
@@ -1686,10 +1643,12 @@ function checkGuestAuthenticationStrength(
     return findings;
   }
 
-  // Determine severity and messaging based on authentication strength type
-  let severity: Severity = "high";
+  // Requiring MFA / authentication strength for guests is best practice, not a
+  // weakness — this finding is an *operational advisory* that Cross-Tenant
+  // Access Settings (inbound MFA trust) must be configured so guests aren't
+  // unexpectedly blocked. Report it as informational, not High/Medium.
+  const severity: Severity = "info";
   let strengthType = "MFA";
-  let requiresCrossTenantTrust = true;
 
   if (requiresAuthStrength) {
     const authStrengthName = grant.authenticationStrength?.displayName || "Unknown";
@@ -1698,13 +1657,9 @@ function checkGuestAuthenticationStrength(
     // tenant authentication-strength catalog, so custom strengths whose
     // displayName doesn't say "phishing-resistant" but whose underlying
     // methods are (FIDO2 / WHfB / x509) are still classified correctly.
-    if (policyUsesPhishingResistant(policy, context)) {
-      severity = "high";
-      strengthType = "Phishing-resistant MFA";
-    } else {
-      severity = "medium";
-      strengthType = `Authentication strength: ${authStrengthName}`;
-    }
+    strengthType = policyUsesPhishingResistant(policy, context)
+      ? "Phishing-resistant MFA"
+      : `Authentication strength: ${authStrengthName}`;
   }
 
   // Determine guest user types being targeted
