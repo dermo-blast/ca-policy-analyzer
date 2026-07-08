@@ -280,13 +280,26 @@ function policyPersonas(p: ConditionalAccessPolicy): Set<Persona> {
   const users = p.conditions.users;
   const includesAllUsers = users.includeUsers.includes("All");
   if (includesAllUsers) {
-    // A policy targeting all users always counts toward Global, and also
-    // toward Internals (employees are 'all users' minus exclusions).
+    // A policy targeting all users enforces on every internal human persona:
+    // Global, Internals (employees), and also Admins and Developers — those are
+    // users too, so a tenant-wide control genuinely covers them. Crediting them
+    // here prevents a baseline control (e.g. All-Users MFA) from being falsely
+    // reported as a per-persona gap for admins/developers.
     out.add("global");
     out.add("internals");
+    out.add("admins");
+    out.add("developers");
   }
   if ((users.includeRoles?.length ?? 0) > 0) out.add("admins");
-  if (users.includeGuestsOrExternalUsers) out.add("externals");
+  // Guests / external users. Guest Admins are a subset of external users, so a
+  // guest-targeting policy also covers them for baseline controls (e.g. MFA).
+  const targetsGuests =
+    users.includeGuestsOrExternalUsers != null ||
+    users.includeUsers.includes("GuestsOrExternalUsers");
+  if (targetsGuests) {
+    out.add("externals");
+    out.add("guestadmins");
+  }
 
   // If we still have nothing, default to "unknown" so the policy at least
   // appears somewhere.
