@@ -1921,6 +1921,29 @@ function identifyBreakGlass(context: TenantContext): BreakGlassCandidate | null 
   return primary;
 }
 
+/**
+ * Whether a policy targets real (human) user principals.
+ *
+ * Agent-identity and other workload-only policies use the sentinel
+ * `includeUsers: ["None"]`, which has array length 1 but targets no users — a
+ * naive `includeUsers.length > 0` check misreads it as user-targeting.
+ * Break-glass is a human emergency-access group, so it is irrelevant to these
+ * policies and they must be excluded from break-glass evaluation.
+ *
+ * Guest/external-only policies (`includeGuestsOrExternalUsers`) are treated as
+ * NOT user-targeting here, preserving prior behavior — an internal break-glass
+ * group does not belong on a guest-scoped policy.
+ */
+function policyTargetsUsers(policy: ConditionalAccessPolicy): boolean {
+  const u = policy.conditions.users;
+  const realIncludeUsers = u.includeUsers.filter((x) => x !== "None");
+  return (
+    realIncludeUsers.length > 0 ||
+    u.includeGroups.length > 0 ||
+    u.includeRoles.length > 0
+  );
+}
+
 // ─── Per-Policy Break-Glass Exclusion Check ──────────────────────────────────
 
 function checkBreakGlassPerPolicy(
@@ -1941,12 +1964,10 @@ function checkBreakGlassPerPolicy(
       ? policy.conditions.users.excludeUsers.includes(breakGlass.id)
       : policy.conditions.users.excludeGroups.includes(breakGlass.id);
 
-  // Determine if this policy actually targets users (skip workload-identity-only policies)
-  const targetsUsers =
-    policy.conditions.users.includeUsers.length > 0 ||
-    policy.conditions.users.includeGroups.length > 0 ||
-    policy.conditions.users.includeRoles.length > 0;
-  if (!targetsUsers) return [];
+  // Skip workload-identity-only policies (e.g. agent-identity policies using the
+  // `includeUsers: ["None"]` sentinel) — break-glass is a human group and does
+  // not apply to them.
+  if (!policyTargetsUsers(policy)) return [];
 
   if (excluded) {
     return [
@@ -2177,10 +2198,7 @@ function checkTenantWideGaps(context: TenantContext): Finding[] {
   // Count break-glass coverage across ALL policies (not just critical ones)
   const allPolicies = context.policies;
   const totalPolicyCount = allPolicies.length;
-  const userTargetingPolicies = allPolicies.filter(p => {
-    const u = p.conditions.users;
-    return u.includeUsers.length > 0 || u.includeGroups.length > 0 || u.includeRoles.length > 0;
-  });
+  const userTargetingPolicies = allPolicies.filter(policyTargetsUsers);
 
   let policiesWithBreakGlass = 0;
   let policiesWithoutBreakGlass = 0;
