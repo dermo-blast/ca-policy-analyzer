@@ -330,32 +330,105 @@ function checkCAImmuneResources(
 
 // ─── Check: Grant Control Operator (AND vs OR) ──────────────────────────────
 
+/**
+ * Controls that are considered equivalent strength when combined with OR.
+ * An OR *between members of the same group* is a Microsoft-recommended pattern
+ * (e.g. "require compliant device OR hybrid joined device"), not a
+ * "weakest control wins" weakness — there is no weaker control to downgrade to.
+ * Controls not listed here (mfa, passwordChange, …) are treated as their own
+ * distinct strength tier so mixing them with anything still flags.
+ */
+const EQUIVALENT_STRENGTH_GROUPS: Record<string, string> = {
+  compliantDevice: "device-trust",
+  domainJoinedDevice: "device-trust",
+  approvedApplication: "app-protection",
+  compliantApplication: "app-protection",
+};
+
+/** Human-friendly labels for built-in grant controls used in finding text. */
+const GRANT_CONTROL_LABELS: Record<string, string> = {
+  mfa: "Require MFA",
+  compliantDevice: "Require compliant device",
+  domainJoinedDevice: "Require Microsoft Entra hybrid joined device",
+  approvedApplication: "Require approved client app",
+  compliantApplication: "Require app protection policy",
+  passwordChange: "Require password change",
+};
+
+function labelControl(c: string): string {
+  return GRANT_CONTROL_LABELS[c] ?? c;
+}
+
 function checkGrantControlOperator(
   policy: ConditionalAccessPolicy
 ): Finding[] {
   const findings: Finding[] = [];
   const grant = policy.grantControls;
 
-  if (!grant || grant.builtInControls.length <= 1) return findings;
+  if (!grant || grant.operator !== "OR") return findings;
 
-  if (grant.operator === "OR") {
+  // "block" is terminal and never combined meaningfully with other controls;
+  // evaluate the OR only across the non-block controls.
+  const controls = grant.builtInControls.filter((c) => c !== "block");
+  if (controls.length <= 1) return findings;
+
+  // Determine how many distinct strength tiers the OR spans. Controls in a
+  // known equivalence group collapse to that group's name; anything else is
+  // its own tier keyed by the control itself.
+  const groupOf = (c: string) => EQUIVALENT_STRENGTH_GROUPS[c] ?? `unique:${c}`;
+  const distinctGroups = new Set(controls.map(groupOf));
+  const soleGroup = distinctGroups.size === 1 ? [...distinctGroups][0] : null;
+  const isAcceptedEquivalentOr =
+    soleGroup === "device-trust" || soleGroup === "app-protection";
+
+  const labels = controls.map(labelControl);
+
+  if (isAcceptedEquivalentOr) {
+    // OR between controls of equivalent strength — no weakest-link downgrade.
     findings.push({
       id: nextFindingId(),
       policyId: policy.id,
       policyName: policy.displayName,
-      severity: "high",
+      severity: "info",
       category: "Swiss Cheese Model",
-      title: 'Grant controls use "OR" — weakest control is effective',
+      title: 'Grant controls use "OR" between equivalent-strength controls — accepted pattern',
       description:
-        `This policy requires ${grant.builtInControls.join(" OR ")}. ` +
-        `With the OR operator, only the WEAKEST control needs to be satisfied. ` +
-        `This contradicts the Swiss cheese model of layered security.`,
+        `This policy requires ${labels.join(" OR ")}. ` +
+        `Although it uses the OR operator, all controls are ${soleGroup} controls of equivalent strength, ` +
+        `so there is no "weakest control" for an attacker to downgrade to.\n\n` +
+        (soleGroup === "device-trust"
+          ? `Requiring a **compliant device OR a Microsoft Entra hybrid joined device** is a Microsoft-recommended ` +
+            `way to require a managed, trusted device while supporting both Intune-managed and hybrid-joined ` +
+            `estates. Both controls enforce device trust — neither is weaker than the other.`
+          : `Requiring an **approved client app OR an app protection policy** is Microsoft's recommended mobile ` +
+            `application management (MAM) pattern. Both controls enforce app-level protection of equivalent strength.`),
       recommendation:
-        'Change the operator to "AND" so ALL controls must be satisfied, or ' +
-        "split into separate policies each requiring a single control. " +
-        "Per Fabian Bader: use AND, not OR, for grant controls.",
+        "No change required — this OR is between controls of equivalent strength and does not weaken the policy. " +
+        "If you intend these device/app controls to be layered on top of MFA, add MFA as a separate policy or as an " +
+        "AND condition; do not rely on this policy alone for the MFA layer.",
     });
+    return findings;
   }
+
+  // Mixed strength tiers — a weaker control can satisfy the policy in place of a
+  // stronger one, which is the genuine "weakest control is effective" weakness.
+  findings.push({
+    id: nextFindingId(),
+    policyId: policy.id,
+    policyName: policy.displayName,
+    severity: "high",
+    category: "Swiss Cheese Model",
+    title: 'Grant controls use "OR" — weakest control is effective',
+    description:
+      `This policy requires ${labels.join(" OR ")}. ` +
+      `With the OR operator across controls of differing strength, only the WEAKEST control needs to be ` +
+      `satisfied — an attacker satisfies the easiest one and skips the rest. ` +
+      `This contradicts the Swiss cheese model of layered security.`,
+    recommendation:
+      'Change the operator to "AND" so ALL controls must be satisfied, or ' +
+      "split into separate policies each requiring a single control. " +
+      "Per Fabian Bader: use AND, not OR, for grant controls of differing strength.",
+  });
 
   return findings;
 }
