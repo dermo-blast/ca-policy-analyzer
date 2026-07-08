@@ -139,7 +139,7 @@ export function analyzeAllPolicies(context: TenantContext): AnalysisResult {
       ...checkResourceExclusion(policy, context),
       ...checkCAImmuneResources(policy),
       ...checkGrantControlOperator(policy),
-      ...checkDeviceRegistrationBypass(policy),
+      ...checkDeviceRegistrationBypass(policy, context),
       ...checkServicePrincipalExclusions(policy, context),
       ...checkMissingMFA(policy),
       ...checkAllUsersAllApps(policy, breakGlass),
@@ -435,48 +435,103 @@ function checkGrantControlOperator(
 
 // ─── Check: Device Registration Bypass ───────────────────────────────────────
 
+/** User action targeting device registration/join (only MFA/TOU controls apply). */
+const REGISTER_DEVICE_ACTION = "urn:user:registerdevice";
+
+/** Whether a policy requires MFA or an authentication strength. */
+function policyRequiresMfa(policy: ConditionalAccessPolicy): boolean {
+  const g = policy.grantControls;
+  return !!g && (g.builtInControls.includes("mfa") || g.authenticationStrength != null);
+}
+
 function checkDeviceRegistrationBypass(
-  policy: ConditionalAccessPolicy
+  policy: ConditionalAccessPolicy,
+  context: TenantContext
 ): Finding[] {
   const findings: Finding[] = [];
+  if (policy.state === "disabled") return findings;
+
   const apps = policy.conditions.applications;
   const grant = policy.grantControls;
   const locations = policy.conditions.locations;
 
-  const targetsDRS =
+  // The Device Registration Service is only reachable by a policy that targets
+  // it explicitly (via the register-device user action or the DRS resource) or
+  // that targets "All" apps. A policy scoped to other specific apps or user
+  // actions cannot affect device registration at all — so it can't be a
+  // registration bypass. (Note: "AllAgentIdResources" etc. are NOT "All".)
+  const explicitlyTargetsRegistration =
     apps.includeApplications.includes(DEVICE_REGISTRATION_RESOURCE.resourceId) ||
-    apps.includeApplications.includes("All");
+    apps.includeUserActions.includes(REGISTER_DEVICE_ACTION);
+  const targetsAllApps = apps.includeApplications.includes("All");
+  if (!explicitlyTargetsRegistration && !targetsAllApps) return findings;
 
-  const usesLocationCondition = locations &&
+  const usesLocationCondition =
+    !!locations &&
     (locations.includeLocations.length > 0 || locations.excludeLocations.length > 0);
-
   const requiresCompliantDevice =
     grant?.builtInControls.includes("compliantDevice") ||
     grant?.builtInControls.includes("domainJoinedDevice");
 
-  if (targetsDRS && (usesLocationCondition || requiresCompliantDevice)) {
-    const issues: string[] = [];
-    if (usesLocationCondition) issues.push("location-based conditions");
-    if (requiresCompliantDevice) issues.push("compliant/hybrid-joined device requirement");
+  // Only location/device-compliance controls are ignored by the DRS. If the
+  // policy uses neither, there is nothing the DRS would silently skip.
+  if (!usesLocationCondition && !requiresCompliantDevice) return findings;
 
-    findings.push({
-      id: nextFindingId(),
-      policyId: policy.id,
-      policyName: policy.displayName,
-      severity: "high",
-      category: "Device Registration Bypass",
-      title: `Device Registration Service bypasses ${issues.join(" and ")}`,
-      description:
-        `This policy uses ${issues.join(" and ")}, but the Device Registration Service ` +
-        `(${DEVICE_REGISTRATION_RESOURCE.resourceId}) can ONLY be protected by MFA grant controls. ` +
-        `Location conditions and device compliance requirements are ignored for device registration. ` +
-        `(MSRC VULN-153600 — confirmed by-design by Microsoft)`,
-      recommendation:
-        "Ensure you have a separate policy requiring MFA for the Device Registration Service. " +
-        "Do not rely solely on location or device compliance to protect device enrollment.",
-      relatedIds: [DEVICE_REGISTRATION_RESOURCE.resourceId],
-    });
-  }
+  // The DRS *does* honor MFA / authentication strength. If this policy already
+  // requires MFA, device registration is protected by it — no bypass.
+  if (policyRequiresMfa(policy)) return findings;
+
+  // The documented mitigation is a dedicated policy requiring MFA/auth-strength
+  // for the register-device user action (or the DRS resource). If such an
+  // enabled policy exists, device registration is already protected — the
+  // location/compliance limitation of THIS policy is moot.
+  const hasRegistrationMfaPolicy = context.policies.some((p) => {
+    if (p.id === policy.id || p.state === "disabled") return false;
+    const pa = p.conditions.applications;
+    const coversRegistration =
+      pa.includeUserActions.includes(REGISTER_DEVICE_ACTION) ||
+      pa.includeApplications.includes(DEVICE_REGISTRATION_RESOURCE.resourceId);
+    return coversRegistration && policyRequiresMfa(p);
+  });
+  if (hasRegistrationMfaPolicy) return findings;
+
+  // Genuine gap: the policy leans on controls the DRS ignores, requires no MFA
+  // itself, and no dedicated registration-MFA policy exists.
+  const blocks = grant?.builtInControls.includes("block");
+  const issues: string[] = [];
+  if (usesLocationCondition) issues.push("location-based conditions");
+  if (requiresCompliantDevice) issues.push("a compliant/hybrid-joined device requirement");
+
+  // Explicitly targeting registration with non-MFA controls is a clear
+  // misconfiguration (High). Merely covering it incidentally via "All apps" is
+  // a lower-confidence gap (Medium).
+  const severity: Severity = explicitlyTargetsRegistration ? "high" : "medium";
+
+  const framing = blocks
+    ? `This policy blocks access using ${issues.join(" and ")}, but those conditions are NOT evaluated for the ` +
+      `Device Registration Service (${DEVICE_REGISTRATION_RESOURCE.resourceId}). Device registration is therefore ` +
+      `not covered by this block and can still occur (for example from an untrusted location).`
+    : `This policy relies on ${issues.join(" and ")} to grant access, but those controls are NOT evaluated for the ` +
+      `Device Registration Service (${DEVICE_REGISTRATION_RESOURCE.resourceId}) — only MFA / authentication strength is.`;
+
+  findings.push({
+    id: nextFindingId(),
+    policyId: policy.id,
+    policyName: policy.displayName,
+    severity,
+    category: "Device Registration Bypass",
+    title: explicitlyTargetsRegistration
+      ? "Device registration protected only by controls the service ignores"
+      : "Device Registration Service not covered by this policy's controls",
+    description:
+      `${framing} The DRS only honors MFA grant controls (MSRC VULN-153600 — confirmed by-design by Microsoft). ` +
+      `No separate enabled policy was found that requires MFA or authentication strength for the register-device ` +
+      `user action, so device registration currently has no working control from this policy.`,
+    recommendation:
+      'Create (or enable) a dedicated policy that requires MFA or authentication strength for the ' +
+      '"Register or join devices" user action. Do not rely on location or device compliance to protect device enrollment.',
+    relatedIds: [DEVICE_REGISTRATION_RESOURCE.resourceId],
+  });
 
   return findings;
 }
