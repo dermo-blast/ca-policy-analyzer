@@ -519,7 +519,11 @@ const SEVERITY_GROUP_LABELS: Record<Severity, string> = {
   high: "Actively used, policies would apply",
   medium: "Lower impact",
   low: "Lower impact",
-  info: "No policy would reach them",
+  // This tier is now mixed: an app lands here either because Conditional Access
+  // already evaluated it, or because no enabled policy would reach it. Those are
+  // opposites, so the label has to be neutral - "No policy would reach them" is
+  // actively wrong for the covered ones. The per-app detail says which it is.
+  info: "No action needed",
 };
 
 /** One severity tier: collapsed unless it is the worst, folded after a handful
