@@ -519,7 +519,11 @@ const SEVERITY_GROUP_LABELS: Record<Severity, string> = {
   high: "Actively used, policies would apply",
   medium: "Lower impact",
   low: "Lower impact",
-  info: "No policy would reach them",
+  // This tier is now mixed: an app lands here either because Conditional Access
+  // already evaluated it, or because no enabled policy would reach it. Those are
+  // opposites, so the label has to be neutral - "No policy would reach them" is
+  // actively wrong for the covered ones. The per-app detail says which it is.
+  info: "No action needed",
 };
 
 /** One severity tier: collapsed unless it is the worst, folded after a handful
@@ -596,6 +600,12 @@ export function DiscoveredAppsBlock({
   tenantId?: string;
 }) {
   const [copied, setCopied] = useState(false);
+
+  /** Apps whose name already belongs to a service principal with another appId. */
+  const nameCollisions = useMemo(
+    () => apps.filter((a) => a.nameMatchedServicePrincipals?.length),
+    [apps]
+  );
 
   const stats = useMemo(() => {
     const blocking = apps.filter((a) =>
@@ -719,6 +729,35 @@ export function DiscoveredAppsBlock({
           </button>
         </div>
       </div>
+
+      {nameCollisions.length > 0 && (
+        <div className="flex items-start gap-2 rounded-lg bg-blue-500/5 border border-blue-500/20 p-3">
+          <Lightbulb className="mt-0.5 h-4 w-4 shrink-0 text-blue-400" />
+          <div className="space-y-1.5 text-sm text-blue-300">
+            <p>
+              {nameCollisions.length === 1 ? "One app" : `${nameCollisions.length} apps`}{" "}
+              already {nameCollisions.length === 1 ? "has" : "have"} a service
+              principal under this name, but with a{" "}
+              <strong>different app ID</strong> - usually a recreated
+              registration. A policy scoped to the service principal you can see
+              in Enterprise applications does not match the app ID that is
+              actually signing in, so check which one your policies target.
+            </p>
+            <ul className="space-y-1">
+              {nameCollisions.map((app) => (
+                <li key={app.appId} className="text-blue-300/90">
+                  <span className="font-medium">{app.displayName}</span> signed in
+                  as <code className="text-blue-200">{app.appId}</code>; existing
+                  service principal is{" "}
+                  <code className="text-blue-200">
+                    {app.nameMatchedServicePrincipals![0].appId}
+                  </code>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
 
       <div className="space-y-2">
         <div className="flex items-center gap-1.5">

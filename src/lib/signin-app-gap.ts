@@ -24,6 +24,115 @@ export interface SignInAppGapSummary {
   phantomExclusions: number;
   knownBypass: number;
   stillUncovered: number;
+  /** Apps whose evidence sign-in shows Conditional Access already evaluated them. */
+  observedCovered: number;
+  /** Apps whose name matches an existing service principal with a different appId. */
+  nameMatchedExisting: number;
+}
+
+/**
+ * Service principals indexed by normalized display name.
+ *
+ * Only an exact (normalized) match counts. An app registration that was deleted
+ * and recreated keeps its display name and gets a new appId - that is the case
+ * worth reporting, because a policy scoped to the service principal an admin
+ * can see will not match the appId that is actually signing in. Fuzzy matching
+ * would conflate genuinely separate apps: "Test-Foo" and "Foo" are two apps,
+ * not one recreated twice.
+ */
+function normalizeAppName(name: string | undefined): string {
+  return (name ?? "")
+    .toLowerCase()
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export interface NameMatchedServicePrincipal {
+  appId: string;
+  displayName: string;
+}
+
+function buildServicePrincipalNameIndex(
+  context: TenantContext
+): Map<string, NameMatchedServicePrincipal[]> {
+  const byName = new Map<string, NameMatchedServicePrincipal[]>();
+  for (const sp of context.servicePrincipals.values()) {
+    const key = normalizeAppName(sp.displayName);
+    if (!key) continue;
+    const list = byName.get(key) ?? [];
+    list.push({ appId: sp.appId, displayName: sp.displayName });
+    byName.set(key, list);
+  }
+  return byName;
+}
+
+export function findNameMatchedServicePrincipals(
+  displayName: string | undefined,
+  appId: string,
+  index: Map<string, NameMatchedServicePrincipal[]>
+): NameMatchedServicePrincipal[] {
+  const key = normalizeAppName(displayName);
+  if (!key) return [];
+  return (index.get(key) ?? []).filter(
+    (sp) => sp.appId.toLowerCase() !== appId.toLowerCase()
+  );
+}
+
+/**
+ * What the app's own evidence sign-in says about Conditional Access reaching it.
+ *
+ *  - `covered`        Entra evaluated CA and reached a verdict, so the app is in
+ *                     policy scope today. A policy targeting All resources reaches
+ *                     apps that can't be named in the picker, so "no service
+ *                     principal" does not imply "no policy applies".
+ *  - `userOutOfScope` A policy matched the application but not the user, so the
+ *                     sampled sign-in was an excluded account - evidence about
+ *                     that user, not about the app being unreachable.
+ *  - `appUnmatched`   Every policy that ran failed on the application condition:
+ *                     the app itself is what no policy matched.
+ *  - `unknown`        No evidence row, or nothing conclusive in it.
+ */
+export type ObservedCoverage =
+  | "covered"
+  | "userOutOfScope"
+  | "appUnmatched"
+  | "unknown";
+
+function conditionList(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+export function classifyObservedCoverage(
+  conditionalAccessStatus: string | undefined,
+  policies: ReadonlyArray<{ conditionsNotSatisfied?: string }> | undefined
+): ObservedCoverage {
+  const status = conditionalAccessStatus?.trim().toLowerCase();
+  if (!status) return "unknown";
+  // "failure" still means CA applied - the user just didn't satisfy it.
+  if (status === "success" || status === "failure") return "covered";
+  if (status !== "notapplied") return "unknown";
+
+  const evaluated = policies ?? [];
+  if (evaluated.length === 0) return "unknown";
+
+  // A policy that satisfied the application condition but not the user proves
+  // the app is reachable by policy - the sampled account was simply excluded.
+  const matchedAppNotUser = evaluated.some((p) => {
+    const missing = conditionList(p.conditionsNotSatisfied);
+    return missing.includes("users") && !missing.includes("application");
+  });
+  if (matchedAppNotUser) return "userOutOfScope";
+
+  const everyPolicyMissedTheApp = evaluated.every((p) =>
+    conditionList(p.conditionsNotSatisfied).includes("application")
+  );
+  if (everyPolicyMissedTheApp) return "appUnmatched";
+
+  return "unknown";
 }
 
 export interface SignInAppGapResult {
@@ -133,6 +242,19 @@ function gradeApp(
 ): Severity {
   if (bypassNote) return "critical";
   if (phantomExclusionPolicies.length > 0) return "critical";
+
+  // Observed evidence outranks predicted impact. The rest of this function
+  // grades what *would* happen once a service principal exists; if Entra has
+  // already evaluated Conditional Access for this app, that prediction is not
+  // a security gap, and grading it critical contradicts the evidence stored on
+  // the finding itself.
+  const coverage = classifyObservedCoverage(
+    app.conditionalAccessStatus,
+    app.appliedPolicies
+  );
+  if (coverage === "covered") return "info";
+  if (coverage === "userOutOfScope") return "low";
+
   if (impact.some(wouldBlock)) return "critical";
 
   const enabledWillApply = impact.some(
@@ -196,12 +318,21 @@ export function analyzeSignInAppGap(
         phantomExclusions: 0,
         knownBypass: 0,
         stillUncovered: 0,
+        observedCovered: 0,
+        nameMatchedExisting: 0,
       },
       truncated: false,
       evidenceCapped: 0,
       scanUnavailable: true,
     };
   }
+
+  // An app whose display name matches a service principal that already exists
+  // under a DIFFERENT appId is usually a registration that was recreated. Worth
+  // saying out loud: an admin looking at Enterprise applications sees the name
+  // and assumes it is covered, but a policy scoped to that service principal
+  // does not match the appId actually signing in.
+  const nameIndex = buildServicePrincipalNameIndex(context);
 
   const apps: DiscoveredAppDetail[] = scan.apps.map((app) => {
     const impact = evaluateAppImpact(
@@ -218,10 +349,16 @@ export function analyzeSignInAppGap(
       .filter((i) => i.phantomExclusion)
       .map((i) => i.policyName);
     const bypassNote = buildBypassNote(app.appId);
+    const displayName = resolveDisplayName(app);
+    const nameMatchedServicePrincipals = findNameMatchedServicePrincipals(
+      displayName,
+      app.appId,
+      nameIndex
+    );
 
     return {
       appId: app.appId,
-      displayName: resolveDisplayName(app),
+      displayName,
       signInCount: app.signInCount,
       seenIn: app.seenIn,
       lastSeen: app.lastSeen,
@@ -240,8 +377,13 @@ export function analyzeSignInAppGap(
       baselineNote: buildBaselineNote(app.appId, templateResult),
       phantomExclusionPolicies,
       evidenceMissing: !app.lastSeen,
+      nameMatchedServicePrincipals: nameMatchedServicePrincipals.length
+        ? nameMatchedServicePrincipals
+        : undefined,
     };
   });
+
+  const nameMatched = apps.filter((a) => a.nameMatchedServicePrincipals?.length);
 
   const summary: SignInAppGapSummary = {
     total: apps.length,
@@ -265,6 +407,12 @@ export function analyzeSignInAppGap(
           (i) => i.state === "enabled" && i.verdict !== "willNotApply"
         )
     ).length,
+    observedCovered: apps.filter(
+      (a) =>
+        classifyObservedCoverage(a.conditionalAccessStatus, a.observedPolicies) ===
+        "covered"
+    ).length,
+    nameMatchedExisting: nameMatched.length,
   };
 
   const findings: Finding[] = [];
@@ -286,6 +434,16 @@ export function analyzeSignInAppGap(
       notes.push(
         `${summary.stillUncovered} of these apps would still not be reached by any enabled policy ` +
           "even after you create the service principal - check whether a policy targeting All resources exists."
+      );
+    }
+    // The name-collision detail is deliberately NOT appended here - it renders
+    // as its own callout beside the app list, where the apps it refers to are.
+    if (summary.observedCovered > 0) {
+      notes.push(
+        `${summary.observedCovered} of these apps were already evaluated by Conditional Access on ` +
+          "their most recent sign-in, so policy reaches them today - a policy targeting All resources " +
+          "covers apps that cannot be named in the picker. For those, creating the service principal " +
+          "buys the ability to target or exclude them individually, not new coverage."
       );
     }
 
