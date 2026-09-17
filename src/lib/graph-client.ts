@@ -255,6 +255,37 @@ export interface TenantContext {
    * failed/was not permitted (e.g. missing Policy.Read.All).
    */
   conditionalAccessSettings?: ConditionalAccessSettings | null;
+  /**
+   * External Authentication Methods configured in the tenant. Null when the
+   * fetch failed or was not permitted, which must be treated as "unknown" -
+   * never as "no EAM" - so checks fail open rather than silently suppressing.
+   */
+  externalAuthMethods?: ExternalAuthMethodState | null;
+}
+
+/**
+ * One externalAuthenticationMethodConfiguration from the authentication methods
+ * policy. `includeTargets` / `excludeTargets` are group IDs (or the literal
+ * "all_users"), which is what makes it possible to say whether EAM actually
+ * reaches the users a policy targets.
+ */
+export interface ExternalAuthMethodConfig {
+  id: string;
+  displayName: string;
+  /** "enabled" | "disabled" */
+  state: string;
+  appId?: string;
+  includeTargets: string[];
+  excludeTargets: string[];
+}
+
+export interface ExternalAuthMethodState {
+  /** Every EAM configuration found, whatever its state. */
+  all: ExternalAuthMethodConfig[];
+  /** Only those with state "enabled" - the ones that can actually be used. */
+  enabled: ExternalAuthMethodConfig[];
+  /** True when at least one enabled EAM targets every user. */
+  targetsAllUsers: boolean;
 }
 
 /**
@@ -760,6 +791,57 @@ export async function fetchConditionalAccessSettings(
   return client.api("/identity/conditionalAccess/settings").version("beta").get();
 }
 
+const EAM_ODATA_TYPE = "#microsoft.graph.externalAuthenticationMethodConfiguration";
+
+function targetIds(targets: unknown): string[] {
+  if (!Array.isArray(targets)) return [];
+  return targets
+    .map((t) => (t as { id?: string })?.id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+/**
+ * GET /policies/authenticationMethodsPolicy, keeping only the External
+ * Authentication Method entries.
+ *
+ * Reading this needs Policy.Read.AuthenticationMethod, with Policy.Read.All
+ * listed by Microsoft as a higher-privileged alternative - the scope this app
+ * already requests - so no additional consent is required. Delegated access
+ * also requires the signed-in user to hold a supporting role (Global Reader or
+ * Authentication Policy Administrator); without it the call 403s and the
+ * caller degrades to null.
+ */
+export async function fetchExternalAuthMethods(
+  client: Client
+): Promise<ExternalAuthMethodState> {
+  const policy = await client.api("/policies/authenticationMethodsPolicy").get();
+  const configs: unknown[] = policy?.authenticationMethodConfigurations ?? [];
+
+  const all: ExternalAuthMethodConfig[] = configs
+    .filter((c) => (c as { "@odata.type"?: string })?.["@odata.type"] === EAM_ODATA_TYPE)
+    .map((c) => {
+      const cfg = c as Record<string, unknown>;
+      return {
+        id: String(cfg.id ?? ""),
+        displayName: String(cfg.displayName ?? "External authentication method"),
+        state: String(cfg.state ?? "unknown"),
+        appId: typeof cfg.appId === "string" ? cfg.appId : undefined,
+        includeTargets: targetIds(cfg.includeTargets),
+        excludeTargets: targetIds(cfg.excludeTargets),
+      };
+    });
+
+  const enabled = all.filter((c) => c.state.toLowerCase() === "enabled");
+
+  return {
+    all,
+    enabled,
+    targetsAllUsers: enabled.some((c) =>
+      c.includeTargets.some((t) => t.toLowerCase() === "all_users")
+    ),
+  };
+}
+
 async function resolveDirectoryObject(
   client: Client,
   id: string
@@ -1021,6 +1103,15 @@ export async function loadTenantContext(
     // expose this preview endpoint - degrade gracefully to null.
   }
 
+  let externalAuthMethods: ExternalAuthMethodState | null = null;
+  try {
+    externalAuthMethods = await fetchExternalAuthMethods(client);
+  } catch {
+    // Needs a supporting directory role as well as the scope. Null means
+    // "unknown", and every consumer must fail open on it rather than
+    // concluding the tenant has no External Authentication Methods.
+  }
+
   // The heaviest step, and the only one needing AuditLog.Read.All. Downstream
   // already treats an absent result as "not scanned".
   let unregisteredSignInApps: UnregisteredSignInAppsResult | undefined;
@@ -1078,5 +1169,5 @@ export async function loadTenantContext(
     if (domain) tenantDisplayName = domain;
   }
 
-  return { tenantDisplayName, tenantId, policies, namedLocations, servicePrincipals, directoryObjects, licenses, authStrengthPolicies, unregisteredSignInApps, policySignInMatches, conditionalAccessSettings };
+  return { tenantDisplayName, tenantId, policies, namedLocations, servicePrincipals, directoryObjects, licenses, authStrengthPolicies, unregisteredSignInApps, policySignInMatches, conditionalAccessSettings, externalAuthMethods };
 }
