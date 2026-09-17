@@ -12,6 +12,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import React from "react";
+import { renderToString } from "react-dom/server";
+import { DiscoveredAppsBlock } from "../src/components/findings-list";
 import {
   buildTenantContextFromOfflineExport,
   type OfflineExportPayload,
@@ -143,12 +146,39 @@ const checks: Array<[string, () => void]> = [
     },
   ],
   [
-    "the finding explains the name collision with both app IDs",
+    "the collision is carried on the app, not buried in the description prose",
     () => {
+      const app = byName["Fixture App"];
+      assert.equal(app.nameMatchedServicePrincipals?.length, 1);
+      assert.equal(
+        app.nameMatchedServicePrincipals![0].appId,
+        "44444444-4444-4444-4444-444444444444"
+      );
+      // An app with no collision must not carry an empty array
+      assert.equal(byName["Covered App"].nameMatchedServicePrincipals, undefined);
+
       const finding = gap.findings.find((f) => f.discoveredApps?.length)!;
-      assert.match(finding.description, /recreated registration/);
-      assert.match(finding.description, /eeeeeeee-0000-0000-0000-000000000005/);
-      assert.match(finding.description, /44444444-4444-4444-4444-444444444444/);
+      assert.ok(
+        !/recreated registration/.test(finding.description),
+        "the explanation belongs in its own callout, not the description paragraph"
+      );
+    },
+  ],
+  [
+    "the callout renders beside the app list with both app IDs",
+    () => {
+      const html = renderToString(
+        React.createElement(DiscoveredAppsBlock, { apps: gap.apps })
+      );
+      const flat = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+      assert.match(flat, /recreated registration/);
+      assert.match(flat, /eeeeeeee-0000-0000-0000-000000000005/);
+      assert.match(flat, /44444444-4444-4444-4444-444444444444/);
+      // Rendered above the list it refers to
+      assert.ok(
+        html.indexOf("recreated") < html.indexOf("Apps without a service principal"),
+        "the callout must precede the app list"
+      );
     },
   ],
   [

@@ -327,6 +327,13 @@ export function analyzeSignInAppGap(
     };
   }
 
+  // An app whose display name matches a service principal that already exists
+  // under a DIFFERENT appId is usually a registration that was recreated. Worth
+  // saying out loud: an admin looking at Enterprise applications sees the name
+  // and assumes it is covered, but a policy scoped to that service principal
+  // does not match the appId actually signing in.
+  const nameIndex = buildServicePrincipalNameIndex(context);
+
   const apps: DiscoveredAppDetail[] = scan.apps.map((app) => {
     const impact = evaluateAppImpact(
       {
@@ -342,10 +349,16 @@ export function analyzeSignInAppGap(
       .filter((i) => i.phantomExclusion)
       .map((i) => i.policyName);
     const bypassNote = buildBypassNote(app.appId);
+    const displayName = resolveDisplayName(app);
+    const nameMatchedServicePrincipals = findNameMatchedServicePrincipals(
+      displayName,
+      app.appId,
+      nameIndex
+    );
 
     return {
       appId: app.appId,
-      displayName: resolveDisplayName(app),
+      displayName,
       signInCount: app.signInCount,
       seenIn: app.seenIn,
       lastSeen: app.lastSeen,
@@ -364,21 +377,13 @@ export function analyzeSignInAppGap(
       baselineNote: buildBaselineNote(app.appId, templateResult),
       phantomExclusionPolicies,
       evidenceMissing: !app.lastSeen,
+      nameMatchedServicePrincipals: nameMatchedServicePrincipals.length
+        ? nameMatchedServicePrincipals
+        : undefined,
     };
   });
 
-  // An app whose display name matches a service principal that already exists
-  // under a DIFFERENT appId is usually a registration that was recreated. Worth
-  // saying out loud: an admin looking at Enterprise applications sees the name
-  // and assumes it is covered, but a policy scoped to that service principal
-  // does not match the appId actually signing in.
-  const nameIndex = buildServicePrincipalNameIndex(context);
-  const nameMatched = apps
-    .map((a) => ({
-      app: a,
-      matches: findNameMatchedServicePrincipals(a.displayName, a.appId, nameIndex),
-    }))
-    .filter((x) => x.matches.length > 0);
+  const nameMatched = apps.filter((a) => a.nameMatchedServicePrincipals?.length);
 
   const summary: SignInAppGapSummary = {
     total: apps.length,
@@ -431,23 +436,8 @@ export function analyzeSignInAppGap(
           "even after you create the service principal - check whether a policy targeting All resources exists."
       );
     }
-    if (nameMatched.length > 0) {
-      const named = nameMatched
-        .slice(0, 3)
-        .map(
-          ({ app, matches }) =>
-            `"${app.displayName}" signed in as ${app.appId}, but a service principal of that name ` +
-            `already exists as ${matches[0].appId}`
-        )
-        .join("; ");
-      notes.push(
-        `${nameMatched.length} of these apps share a display name with an existing service principal ` +
-          `under a different app ID - usually a recreated registration: ${named}` +
-          (nameMatched.length > 3 ? ", and others" : "") +
-          ". A policy scoped to the service principal you can see in Enterprise applications does not " +
-          "match the app ID that is actually signing in, so check which one your policies target."
-      );
-    }
+    // The name-collision detail is deliberately NOT appended here - it renders
+    // as its own callout beside the app list, where the apps it refers to are.
     if (summary.observedCovered > 0) {
       notes.push(
         `${summary.observedCovered} of these apps were already evaluated by Conditional Access on ` +

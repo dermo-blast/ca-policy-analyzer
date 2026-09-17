@@ -69,6 +69,12 @@ export interface DiscoveredAppDetail {
   baselineNote?: string;
   phantomExclusionPolicies: string[];
   evidenceMissing: boolean;
+  /**
+   * Service principals that already exist under this app's display name but a
+   * different appId - the signature of a recreated registration. Shaped inline
+   * rather than imported from signin-app-gap, which imports this module.
+   */
+  nameMatchedServicePrincipals?: Array<{ appId: string; displayName: string }>;
 }
 
 export interface Finding {
