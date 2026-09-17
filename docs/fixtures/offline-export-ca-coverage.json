@@ -412,6 +412,18 @@
       "ipAddress": "203.0.113.10",
       "clientAppUsed": "Other clients",
       "resourceDisplayName": "Microsoft Graph"
+    },
+    {
+      "appId": "eeeeeeee-0000-0000-0000-000000000005",
+      "signInCount": 100,
+      "seenIn": "Interactive",
+      "appDisplayName": "Fixture App",
+      "createdDateTime": "2026-09-01T09:00:00Z",
+      "id": "req-recreated",
+      "userPrincipalName": "user@contoso.com",
+      "ipAddress": "203.0.113.10",
+      "clientAppUsed": "Other clients",
+      "resourceDisplayName": "Microsoft Graph"
     }
   ]
 }

@@ -19,6 +19,7 @@ import {
 import {
   analyzeSignInAppGap,
   classifyObservedCoverage,
+  findNameMatchedServicePrincipals,
 } from "../src/lib/signin-app-gap";
 
 const fixturePath = path.join(
@@ -34,14 +35,15 @@ const byName = Object.fromEntries(gap.apps.map((a) => [a.displayName, a]));
 
 const checks: Array<[string, () => void]> = [
   [
-    "all four fixture apps are discovered, so severity is the only variable",
+    "every fixture app is discovered, so severity is the only variable",
     () => {
-      assert.equal(gap.apps.length, 4);
+      assert.equal(gap.apps.length, 5);
       for (const name of [
         "Covered App",
         "Excluded User App",
         "Unmatched App",
         "No Evidence App",
+        "Fixture App",
       ]) {
         assert.ok(byName[name], `${name} missing from the discovered list`);
       }
@@ -52,8 +54,8 @@ const checks: Array<[string, () => void]> = [
     () => {
       assert.equal(
         gap.summary.wouldBlock,
-        4,
-        "fixture must keep predicted impact constant across all four apps"
+        5,
+        "fixture must keep predicted impact constant across every app"
       );
     },
   ],
@@ -129,6 +131,55 @@ const checks: Array<[string, () => void]> = [
         ]),
         "userOutOfScope"
       );
+    },
+  ],
+  [
+    "an app reusing an existing service principal's name is counted, not hidden",
+    () => {
+      assert.equal(gap.summary.nameMatchedExisting, 1);
+      // It is still reported as missing a service principal, because the appId
+      // that signed in genuinely has none. Suppressing it would hide the trap.
+      assert.ok(byName["Fixture App"], "the recreated app must still be listed");
+    },
+  ],
+  [
+    "the finding explains the name collision with both app IDs",
+    () => {
+      const finding = gap.findings.find((f) => f.discoveredApps?.length)!;
+      assert.match(finding.description, /recreated registration/);
+      assert.match(finding.description, /eeeeeeee-0000-0000-0000-000000000005/);
+      assert.match(finding.description, /44444444-4444-4444-4444-444444444444/);
+    },
+  ],
+  [
+    "name matching is exact once normalized - it never conflates separate apps",
+    () => {
+      const index = new Map([
+        [
+          "fixture app",
+          [{ appId: "44444444-4444-4444-4444-444444444444", displayName: "Fixture App" }],
+        ],
+      ]);
+      // Case and separator differences are the same app
+      assert.equal(
+        findNameMatchedServicePrincipals("FIXTURE-APP", "eeee", index).length,
+        1
+      );
+      // A prefixed variant is a DIFFERENT app, never a match
+      assert.equal(
+        findNameMatchedServicePrincipals("Test-Fixture App", "eeee", index).length,
+        0
+      );
+      // The service principal's own app never matches itself
+      assert.equal(
+        findNameMatchedServicePrincipals(
+          "Fixture App",
+          "44444444-4444-4444-4444-444444444444",
+          index
+        ).length,
+        0
+      );
+      assert.equal(findNameMatchedServicePrincipals(undefined, "eeee", index).length, 0);
     },
   ],
   [

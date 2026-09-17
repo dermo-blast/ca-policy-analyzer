@@ -26,6 +26,57 @@ export interface SignInAppGapSummary {
   stillUncovered: number;
   /** Apps whose evidence sign-in shows Conditional Access already evaluated them. */
   observedCovered: number;
+  /** Apps whose name matches an existing service principal with a different appId. */
+  nameMatchedExisting: number;
+}
+
+/**
+ * Service principals indexed by normalized display name.
+ *
+ * Only an exact (normalized) match counts. An app registration that was deleted
+ * and recreated keeps its display name and gets a new appId - that is the case
+ * worth reporting, because a policy scoped to the service principal an admin
+ * can see will not match the appId that is actually signing in. Fuzzy matching
+ * would conflate genuinely separate apps: "Test-Foo" and "Foo" are two apps,
+ * not one recreated twice.
+ */
+function normalizeAppName(name: string | undefined): string {
+  return (name ?? "")
+    .toLowerCase()
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export interface NameMatchedServicePrincipal {
+  appId: string;
+  displayName: string;
+}
+
+function buildServicePrincipalNameIndex(
+  context: TenantContext
+): Map<string, NameMatchedServicePrincipal[]> {
+  const byName = new Map<string, NameMatchedServicePrincipal[]>();
+  for (const sp of context.servicePrincipals.values()) {
+    const key = normalizeAppName(sp.displayName);
+    if (!key) continue;
+    const list = byName.get(key) ?? [];
+    list.push({ appId: sp.appId, displayName: sp.displayName });
+    byName.set(key, list);
+  }
+  return byName;
+}
+
+export function findNameMatchedServicePrincipals(
+  displayName: string | undefined,
+  appId: string,
+  index: Map<string, NameMatchedServicePrincipal[]>
+): NameMatchedServicePrincipal[] {
+  const key = normalizeAppName(displayName);
+  if (!key) return [];
+  return (index.get(key) ?? []).filter(
+    (sp) => sp.appId.toLowerCase() !== appId.toLowerCase()
+  );
 }
 
 /**
@@ -268,6 +319,7 @@ export function analyzeSignInAppGap(
         knownBypass: 0,
         stillUncovered: 0,
         observedCovered: 0,
+        nameMatchedExisting: 0,
       },
       truncated: false,
       evidenceCapped: 0,
@@ -315,6 +367,19 @@ export function analyzeSignInAppGap(
     };
   });
 
+  // An app whose display name matches a service principal that already exists
+  // under a DIFFERENT appId is usually a registration that was recreated. Worth
+  // saying out loud: an admin looking at Enterprise applications sees the name
+  // and assumes it is covered, but a policy scoped to that service principal
+  // does not match the appId actually signing in.
+  const nameIndex = buildServicePrincipalNameIndex(context);
+  const nameMatched = apps
+    .map((a) => ({
+      app: a,
+      matches: findNameMatchedServicePrincipals(a.displayName, a.appId, nameIndex),
+    }))
+    .filter((x) => x.matches.length > 0);
+
   const summary: SignInAppGapSummary = {
     total: apps.length,
     wouldBlock: apps.filter((a) => a.predictedImpact.some(wouldBlock)).length,
@@ -342,6 +407,7 @@ export function analyzeSignInAppGap(
         classifyObservedCoverage(a.conditionalAccessStatus, a.observedPolicies) ===
         "covered"
     ).length,
+    nameMatchedExisting: nameMatched.length,
   };
 
   const findings: Finding[] = [];
@@ -363,6 +429,23 @@ export function analyzeSignInAppGap(
       notes.push(
         `${summary.stillUncovered} of these apps would still not be reached by any enabled policy ` +
           "even after you create the service principal - check whether a policy targeting All resources exists."
+      );
+    }
+    if (nameMatched.length > 0) {
+      const named = nameMatched
+        .slice(0, 3)
+        .map(
+          ({ app, matches }) =>
+            `"${app.displayName}" signed in as ${app.appId}, but a service principal of that name ` +
+            `already exists as ${matches[0].appId}`
+        )
+        .join("; ");
+      notes.push(
+        `${nameMatched.length} of these apps share a display name with an existing service principal ` +
+          `under a different app ID - usually a recreated registration: ${named}` +
+          (nameMatched.length > 3 ? ", and others" : "") +
+          ". A policy scoped to the service principal you can see in Enterprise applications does not " +
+          "match the app ID that is actually signing in, so check which one your policies target."
       );
     }
     if (summary.observedCovered > 0) {
