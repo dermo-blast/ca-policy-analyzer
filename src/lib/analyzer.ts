@@ -32,6 +32,11 @@ import {
 } from "@/data/known-exclusions";
 import { ADMIN_ROLE_IDS } from "@/data/policy-templates";
 import { policyUsesPhishingResistant } from "./phishing-resistant";
+import {
+  describeAuthenticationFlows,
+  describeTermsOfUse,
+  summarizeGuestsOrExternalUsers,
+} from "./condition-labels";
 
 // ─── Finding Types ───────────────────────────────────────────────────────────
 
@@ -3357,7 +3362,13 @@ function buildVisualization(
     targetUsers = "Guests / External users";
   } else {
     const count = users.includeUsers.length + users.includeGroups.length + users.includeRoles.length;
-    targetUsers = `${count} specific user/group/role targets`;
+    const guests = summarizeGuestsOrExternalUsers(users.includeGuestsOrExternalUsers);
+    if (guests && count === 0) {
+      targetUsers = guests;
+    } else {
+      targetUsers = `${count} specific user/group/role targets`;
+      if (guests) targetUsers += ` + ${guests}`;
+    }
   }
 
   // Apps summary
@@ -3418,6 +3429,8 @@ function buildVisualization(
   if (policy.conditions.devices?.deviceFilter) {
     conditions.push(`Device filter: ${policy.conditions.devices.deviceFilter.rule}`);
   }
+  const authFlows = describeAuthenticationFlows(policy.conditions.authenticationFlows);
+  if (authFlows) conditions.push(authFlows);
 
   // Grant controls
   const grantControls: string[] = [];
@@ -3440,7 +3453,9 @@ function buildVisualization(
       if (g.authenticationStrength) {
         controls.push(`🛡️ Auth strength: ${g.authenticationStrength.displayName}`);
       }
-      grantControls.push(`${controls.join(` ${g.operator} `)}`);
+      const termsOfUse = describeTermsOfUse(g.termsOfUse);
+      if (termsOfUse) controls.push(termsOfUse);
+      if (controls.length > 0) grantControls.push(controls.join(` ${g.operator} `));
     }
   }
 

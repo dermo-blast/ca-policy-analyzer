@@ -1405,6 +1405,34 @@ function collectObjectIds(policies: ConditionalAccessPolicy[]): Set<string> {
   return ids;
 }
 
+/**
+ * User/group/role IDs a plan's shared conditions and its rules include or
+ * exclude. Resolved alongside the standalone policies' IDs so the Policy Plans
+ * tab can name them - otherwise a group only a plan references (not any
+ * standalone policy) would show as a raw GUID. Non-GUID sentinels ("All",
+ * "None", "GuestsOrExternalUsers") are filtered by resolveDirectoryObjects.
+ */
+export function collectPlanUserIds(plans: ConditionalAccessPolicyPlanWithRules[]): string[] {
+  const ids: string[] = [];
+  const add = (set: ConditionalAccessConditionSet | undefined) => {
+    const u = set?.users;
+    if (!u) return;
+    ids.push(
+      ...(u.includeUsers ?? []),
+      ...(u.excludeUsers ?? []),
+      ...(u.includeGroups ?? []),
+      ...(u.excludeGroups ?? []),
+      ...(u.includeRoles ?? []),
+      ...(u.excludeRoles ?? [])
+    );
+  };
+  for (const plan of plans) {
+    add(plan.sharedConditions);
+    for (const rule of plan.rules) add(rule.conditions);
+  }
+  return ids;
+}
+
 export async function resolveDirectoryObjects(
   client: Client,
   policies: ConditionalAccessPolicy[],
@@ -1693,7 +1721,10 @@ export async function loadTenantContext(
 
   onProgress?.(RUN_STEPS.directoryObjects);
   const planOwnerIds = (policyPlans ?? []).flatMap((p) => p.owners ?? []);
-  const directoryObjects = await resolveDirectoryObjects(client, policies, planOwnerIds);
+  const directoryObjects = await resolveDirectoryObjects(client, policies, [
+    ...planOwnerIds,
+    ...collectPlanUserIds(policyPlans ?? []),
+  ]);
 
   onProgress?.(RUN_STEPS.licenses);
   let licenses: TenantLicenses;

@@ -7,6 +7,7 @@ import {
   ConditionalAccessPolicyRule,
 } from "@/lib/graph-client";
 import {
+  buildUserConditionRows,
   summarizeConditionSet,
   summarizeControls,
   PLAN_RULE_STATE_LABEL,
@@ -67,6 +68,39 @@ function SummaryRow({
   );
 }
 
+/**
+ * Named inclusions/exclusions for a plan's shared conditions or a rule's own
+ * conditions - mirrors the Policies tab's "Condition Details" table.
+ */
+function UserConditionDetails({
+  rows,
+  title,
+}: {
+  rows: [string, string][];
+  title: string;
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <h5 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">{title}</h5>
+      <div className="rounded-lg border border-gray-800 overflow-hidden">
+        <table className="w-full text-xs">
+          <tbody>
+            {rows.map(([label, value]) => (
+              <tr key={label} className="border-b border-gray-800 last:border-0">
+                <td className="px-3 py-1.5 text-gray-500 font-medium whitespace-nowrap w-36 bg-gray-900/50">
+                  {label}
+                </td>
+                <td className="px-3 py-1.5 text-gray-300 break-all">{value}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 const CONFLICT_BOX_CLASS: Record<PlanRulePolicyConflict["severity"], string> = {
   critical: "border-red-500/30 bg-red-500/5",
   high: "border-orange-500/30 bg-orange-500/5",
@@ -120,14 +154,17 @@ function RuleCard({
   rule,
   context,
   conflict,
+  resolverMaps,
 }: {
   rule: ConditionalAccessPolicyRule;
   context: PlanVisualizerContext;
   conflict?: PlanRulePolicyConflict;
+  resolverMaps?: GuidResolverMaps;
 }) {
   const [expanded, setExpanded] = useState(false);
   const conditionSummary = summarizeConditionSet(rule.conditions, context);
   const controlsSummary = summarizeControls(rule.controls);
+  const userRows = buildUserConditionRows(rule.conditions, resolverMaps);
 
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-950/40">
@@ -189,6 +226,7 @@ function RuleCard({
             <SummaryRow icon={ShieldCheck} label="Grant Controls" value={controlsSummary.grantControls} emptyText="No grant controls" />
             <SummaryRow icon={Clock} label="Session Controls" value={controlsSummary.sessionControls} emptyText="No session controls" />
           </div>
+          <UserConditionDetails rows={userRows} title="Rule-level users" />
           {conflict && <ConflictNotice conflict={conflict} />}
           <p className="mt-3 text-xs text-gray-700 font-mono">ID: {rule.id}</p>
         </div>
@@ -215,6 +253,7 @@ function PlanCard({
 }) {
   const [expanded, setExpanded] = useState(true);
   const sharedSummary = summarizeConditionSet(plan.sharedConditions, context);
+  const sharedUserRows = buildUserConditionRows(plan.sharedConditions, resolverMaps);
   const planConflictCount = plan.rules.filter((r) => conflictsByRuleId.has(r.id)).length;
 
   return (
@@ -279,6 +318,7 @@ function PlanCard({
               <SummaryRow icon={Cloud} label="Cloud Apps" value={sharedSummary.targetApps} emptyText="Left to each rule" />
               <SummaryRow icon={Filter} label="Other conditions" value={sharedSummary.conditions} emptyText="None" />
             </div>
+            <UserConditionDetails rows={sharedUserRows} title="Shared users" />
           </div>
 
           <div>
@@ -290,7 +330,13 @@ function PlanCard({
                 <p className="text-sm text-gray-600">This plan has no rules yet.</p>
               ) : (
                 plan.rules.map((rule) => (
-                  <RuleCard key={rule.id} rule={rule} context={context} conflict={conflictsByRuleId.get(rule.id)} />
+                  <RuleCard
+                    key={rule.id}
+                    rule={rule}
+                    context={context}
+                    conflict={conflictsByRuleId.get(rule.id)}
+                    resolverMaps={resolverMaps}
+                  />
                 ))
               )}
             </div>

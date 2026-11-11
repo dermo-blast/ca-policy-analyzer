@@ -21,6 +21,13 @@ import {
   ServicePrincipal,
 } from "./graph-client";
 import { WELL_KNOWN_APP_MAP } from "@/data/ca-bypass-database";
+import {
+  describeAuthenticationFlows,
+  describeGuestsOrExternalUsers,
+  describeTermsOfUse,
+  summarizeGuestsOrExternalUsers,
+} from "./condition-labels";
+import { resolveGuidList, resolveRoleList, type GuidResolverMaps } from "./role-names";
 
 export interface ConditionSetSummary {
   targetUsers: string | null;
@@ -62,7 +69,13 @@ export function summarizeConditionSet(
         (users.includeUsers?.length ?? 0) +
         (users.includeGroups?.length ?? 0) +
         (users.includeRoles?.length ?? 0);
-      if (count > 0) targetUsers = `${count} specific user/group/role targets`;
+      const guests = summarizeGuestsOrExternalUsers(users.includeGuestsOrExternalUsers);
+      if (count > 0) {
+        targetUsers = `${count} specific user/group/role targets`;
+        if (guests) targetUsers += ` + ${guests}`;
+      } else if (guests) {
+        targetUsers = guests;
+      }
     }
   }
 
@@ -131,8 +144,46 @@ export function summarizeConditionSet(
   if (conditions.agentIdRiskLevels) {
     conditionList.push(`Agent risk: ${conditions.agentIdRiskLevels}`);
   }
+  const authFlows = describeAuthenticationFlows(conditions.authenticationFlows);
+  if (authFlows) conditionList.push(authFlows);
 
   return { targetUsers, targetApps, conditions: conditionList };
+}
+
+/**
+ * Who a plan's shared conditions or a rule's own conditions include and
+ * exclude, by name - the same rows the Policies tab shows under "Condition
+ * Details". The one-line summary above only counts targets, and only counts
+ * exclusions when a set includes "All users", so without this a plan's shared
+ * exclusions (break-glass, service accounts) aren't visible anywhere.
+ *
+ * Only rows that are actually set are returned, in include/exclude pairs.
+ */
+export function buildUserConditionRows(
+  conditions: ConditionalAccessConditionSet | undefined,
+  maps?: GuidResolverMaps
+): [string, string][] {
+  const users = conditions?.users;
+  if (!users) return [];
+  const rows: [string, string][] = [];
+  const realIncludeUsers = (users.includeUsers ?? []).filter(
+    (u) => u !== "All" && u !== "None" && u !== "GuestsOrExternalUsers"
+  );
+
+  if (users.includeUsers?.includes("All")) rows.push(["Include Users", "All users"]);
+  else if (realIncludeUsers.length > 0) rows.push(["Include Users", resolveGuidList(realIncludeUsers, maps)]);
+  if (users.excludeUsers?.length) rows.push(["Exclude Users", resolveGuidList(users.excludeUsers, maps)]);
+  if (users.includeGroups?.length) rows.push(["Include Groups", resolveGuidList(users.includeGroups, maps)]);
+  if (users.excludeGroups?.length) rows.push(["Exclude Groups", resolveGuidList(users.excludeGroups, maps)]);
+  if (users.includeRoles?.length) rows.push(["Include Roles", resolveRoleList(users.includeRoles, maps)]);
+  if (users.excludeRoles?.length) rows.push(["Exclude Roles", resolveRoleList(users.excludeRoles, maps)]);
+
+  const includeGuests = describeGuestsOrExternalUsers(users.includeGuestsOrExternalUsers);
+  if (includeGuests) rows.push(["Include Guests", includeGuests]);
+  const excludeGuests = describeGuestsOrExternalUsers(users.excludeGuestsOrExternalUsers);
+  if (excludeGuests) rows.push(["Exclude Guests", excludeGuests]);
+
+  return rows;
 }
 
 export function summarizeControls(
@@ -158,6 +209,8 @@ export function summarizeControls(
       if (g.authenticationStrength) {
         names.push(`🛡️ Auth strength: ${g.authenticationStrength.displayName}`);
       }
+      const termsOfUse = describeTermsOfUse(g.termsOfUse);
+      if (termsOfUse) names.push(termsOfUse);
       if (names.length > 0) grantControls.push(names.join(` ${g.operator} `));
     }
   }
