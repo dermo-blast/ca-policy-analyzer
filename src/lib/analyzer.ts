@@ -1279,7 +1279,7 @@ const HIGH_PRIVILEGE_ROLE_IDS: Record<string, string> = {
   [ADMIN_ROLE_IDS.authenticationAdmin]: "Authentication Administrator",
   [ADMIN_ROLE_IDS.authenticationPolicyAdmin]: "Authentication Policy Administrator",
   [ADMIN_ROLE_IDS.hybridIdentityAdmin]: "Hybrid Identity Administrator",
-  [ADMIN_ROLE_IDS.intunAdmin]: "Intune Administrator",
+  [ADMIN_ROLE_IDS.intuneAdmin]: "Intune Administrator",
 };
 
 /** Subset that is ultra-critical - Global Admin + Privileged Role Admin */

@@ -205,7 +205,7 @@ export const ADMIN_ROLE_IDS: Record<string, string> = {
   guestInviter: "95e79109-95c0-4d8e-aee3-d01accf2d47b",
 
   // ── Device ──
-  intunAdmin: "3a2c62db-5318-420d-8d74-23affee5d9d5",
+  intuneAdmin: "3a2c62db-5318-420d-8d74-23affee5d9d5",
   cloudDeviceAdmin: "7698a772-787b-4ac8-901f-60d6b08affd2",
   windows365Admin: "11451d60-acb2-45eb-a7d6-43d0f0125c13",
   windowsUpdateDeploymentAdmin: "32696413-001a-46ae-978c-ce0f6b3620d2",

@@ -26,6 +26,7 @@ import {
   type ConditionalAccessPolicyPlanWithRules,
 } from "../src/lib/graph-client";
 import { PolicyPlansView } from "../src/components/policy-plans-view";
+import { ROLE_NAME_MAP } from "../src/lib/role-names";
 
 const ALL_GUEST_TYPES =
   "internalGuest,b2bCollaborationGuest,b2bCollaborationMember,b2bDirectConnectUser,otherExternalUser,serviceProvider";
@@ -255,6 +256,12 @@ const checks: Array<[string, () => void]> = [
     () => {
       assert.deepEqual(buildUserConditionRows({ clientAppTypes: ["all"] }, resolverMaps), []);
       assert.deepEqual(buildUserConditionRows(undefined, resolverMaps), []);
+    },
+  ],
+  [
+    "role names are spelled correctly (Intune Administrator role)",
+    () => {
+      assert.equal(ROLE_NAME_MAP["3a2c62db-5318-420d-8d74-23affee5d9d5"], "Intune Admin");
     },
   ],
   [
