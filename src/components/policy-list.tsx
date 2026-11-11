@@ -5,6 +5,7 @@ import { PolicySignInLogResult, PolicySignInMatch, buildPolicySignInLogQueryUrl,
 import { SeverityBadge, Card } from "./ui-primitives";
 import { cn } from "@/lib/utils";
 import { resolveRoleList, resolveGuidList, type GuidResolverMaps } from "@/lib/role-names";
+import { describeGuestsOrExternalUsers } from "@/lib/condition-labels";
 import {
   Users,
   Cloud,
@@ -567,6 +568,10 @@ function PolicyCard({ result, resolverMaps, policySignInMatches }: { result: Pol
               rows.push(["Include Roles", resolveRoleList(u.includeRoles, resolverMaps)]);
             if (u.excludeRoles.length > 0)
               rows.push(["Exclude Roles", resolveRoleList(u.excludeRoles, resolverMaps)]);
+            const includeGuests = describeGuestsOrExternalUsers(u.includeGuestsOrExternalUsers);
+            if (includeGuests) rows.push(["Include Guests", includeGuests]);
+            const excludeGuests = describeGuestsOrExternalUsers(u.excludeGuestsOrExternalUsers);
+            if (excludeGuests) rows.push(["Exclude Guests", excludeGuests]);
             if (policy.conditions.clientAppTypes.length > 0)
               rows.push(["Client App Types", policy.conditions.clientAppTypes.join(", ")]);
             if (policy.conditions.platforms?.includePlatforms.length)
